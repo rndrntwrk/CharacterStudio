@@ -1,0 +1,225 @@
+name: Satori 3333 Wall Public Root TAR Runner
+
+on:
+  push:
+    branches:
+      - scratch/satori-3333-wall-public-20260911
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: satori-3333-wall-public
+  cancel-in-progress: false
+
+jobs:
+  build-wall:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout isolated scratch branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Expand exact Wall runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat runner.b64.* | tr -d '\n' | base64 -d > satori-wall-root-runner.zip
+          echo '5af4d92349cf236e5786bced9607ff58d542141835707604bc00bb99e66d0748  satori-wall-root-runner.zip' | sha256sum -c -
+          mkdir -p runner
+          unzip -q satori-wall-root-runner.zip -d runner
+          python -m pip install --upgrade pip
+          python -m pip install -e runner
+
+      - name: Verify deterministic 3,333-cell layout
+        working-directory: runner
+        run: |
+          python - <<'PY'
+          from satori_wall.layout import build_placements
+          placements, empty = build_placements(list(range(1, 3334)), columns=57, rows=59)
+          assert len(placements) == 3333
+          assert len({p.token_id for p in placements}) == 3333
+          assert len({p.mosaic_index for p in placements}) == 3333
+          assert len(empty) == 30
+          assert not set(empty).intersection(p.mosaic_index for p in placements)
+          print('layout gate passed: 3333 occupied, 30 intentional empty, 0 overlap')
+          PY
+
+      - name: Fetch complete canonical metadata DAG
+        shell: bash
+        working-directory: runner
+        run: |
+          set -euo pipefail
+          META='bafybeiar7x3upqmim5m7alzlg6l5wvu2kpfytd3qtymhqfeiqrutficxku'
+          rm -rf bulk/metadata
+          mkdir -p bulk/metadata
+          curl --http1.1 -L --fail --show-error \
+            --retry 8 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 30 --max-time 1800 \
+            -H 'Accept: application/x-tar' \
+            -H 'User-Agent: satori-3333-wall-public/1.0' \
+            "https://gateway.pinata.cloud/ipfs/${META}?format=tar" \
+            | tar -xf - -C bulk/metadata
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('bulk/metadata')
+          by_name = {p.name: p for p in root.rglob('*') if p.is_file()}
+          art = 'bafybeigx7527j3bzrpnc4mhvhrjvlhsnfriinx276cklxiu3ldm4ees3eu'
+          assert len(by_name) == 3333, len(by_name)
+          assert '0' not in by_name and '0.json' not in by_name
+          for token_id in range(1, 3334):
+              path = by_name.get(str(token_id)) or by_name.get(f'{token_id}.json')
+              assert path is not None, token_id
+              data = json.loads(path.read_text(encoding='utf-8'))
+              image = data.get('image') or data.get('image_url')
+              assert image == f'ipfs://{art}/{token_id}.png', (token_id, image)
+          print('metadata gate passed: 3333 exact token-to-artwork mappings')
+          PY
+
+      - name: Fetch complete canonical artwork DAG as one streamed archive
+        shell: bash
+        working-directory: runner
+        run: |
+          set -euo pipefail
+          ART='bafybeigx7527j3bzrpnc4mhvhrjvlhsnfriinx276cklxiu3ldm4ees3eu'
+          mkdir -p bulk
+
+          fetch_archive() {
+            local gateway="$1"
+            local label="$2"
+            echo "Attempting ${label} root archive"
+            rm -rf bulk/artwork
+            mkdir -p bulk/artwork
+            if curl --http1.1 -L --fail --show-error \
+              --retry 10 --retry-delay 20 --retry-all-errors \
+              --connect-timeout 30 --max-time 18000 \
+              --speed-time 600 --speed-limit 1024 \
+              -H 'Accept: application/x-tar' \
+              -H 'User-Agent: satori-3333-wall-public/1.0' \
+              "${gateway}/ipfs/${ART}?format=tar" \
+              | tar -xf - -C bulk/artwork; then
+              echo "${label} root archive extracted"
+              return 0
+            fi
+            echo "${label} root archive failed" >&2
+            rm -rf bulk/artwork
+            return 1
+          }
+
+          fetch_archive 'https://gateway.pinata.cloud' 'Pinata' \
+            || fetch_archive 'https://ipfs.filebase.io' 'Filebase' \
+            || fetch_archive 'https://ipfs.io' 'IPFS.io'
+
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+
+          root = Path('bulk/artwork')
+          files = {p.name: p for p in root.rglob('*.png') if p.is_file()}
+          expected = {f'{token_id}.png' for token_id in range(1, 3334)}
+          assert set(files) == expected, {
+              'count': len(files),
+              'missing_sample': sorted(expected - set(files))[:20],
+              'unexpected_sample': sorted(set(files) - expected)[:20],
+          }
+          for token_id in (1, 2, 49, 520, 1376, 2790, 3257, 3333):
+              with Image.open(files[f'{token_id}.png']) as image:
+                  image.verify()
+          print('artwork gate passed: 3333 exact PNG originals; deterministic sample decodes')
+          PY
+
+          printf 'metadata_files=%s\n' "$(find bulk/metadata -type f | wc -l)" > source-counts.txt
+          printf 'artwork_png_files=%s\n' "$(find bulk/artwork -type f -name '*.png' | wc -l)" >> source-counts.txt
+          du -sh bulk/metadata bulk/artwork | tee -a source-counts.txt
+          df -h . | tee -a source-counts.txt
+
+      - name: Hash every original and render canonical Wall
+        shell: bash
+        working-directory: runner
+        run: |
+          set -o pipefail
+          export METADATA_DIR="$PWD/bulk/metadata"
+          export ARTWORK_DIR="$PWD/bulk/artwork"
+          PYTHONPATH=src python run.py 2>&1 | tee satori-wall-run.log
+
+      - name: Fresh canonical release-gate assertion
+        working-directory: runner
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from PIL import Image
+
+          root = Path('artifacts')
+          validation = json.loads((root / 'qa/validation.json').read_text())
+          metrics = validation['metrics']
+          assert validation['release_ready'] is True, validation
+          expected = {
+              'expected_count': 3333,
+              'manifest_entry_count': 3333,
+              'resolved_count': 3333,
+              'unique_token_id_count': 3333,
+              'occupied_cell_count': 3333,
+              'duplicate_token_placements': 0,
+              'missing_token_placements': 0,
+              'empty_cell_overlap': 0,
+          }
+          for key, value in expected.items():
+              assert metrics[key] == value, (key, metrics[key], value)
+          assert metrics['all_placed_sources_hashed'] is True
+          assert metrics['render_dimensions_match'] is True
+
+          manifest = json.loads((root / 'manifest/satori-3333-manifest.json').read_text())
+          assert [row['token_id'] for row in manifest] == list(range(1, 3334))
+          assert all(len(row['sha256']) == 64 for row in manifest)
+
+          dimensions = {
+              'satori-3333-wall.png': (11400, 11800),
+              'satori-3333-wall-banner.jpg': (1500, 500),
+              'satori-3333-wall-16x9.jpg': (1920, 1080),
+              'satori-3333-wall-4x5.jpg': (1350, 1688),
+              'satori-3333-wall-square.jpg': (1080, 1080),
+          }
+          for name, expected_size in dimensions.items():
+              path = root / 'renders' / name
+              assert path.is_file() and path.stat().st_size > 0, name
+              with Image.open(path) as image:
+                  assert image.size == expected_size, (name, image.size, expected_size)
+          print('canonical release gates passed')
+          PY
+
+      - name: Upload canonical Wall release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: satori-3333-wall-canonical-public
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          path: |
+            runner/artifacts/manifest/*
+            runner/artifacts/qa/*
+            runner/artifacts/renders/*
+            runner/source-counts.txt
+            runner/satori-wall-run.log
+
+      - name: Upload failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: satori-3333-wall-public-diagnostics
+          if-no-files-found: ignore
+          compression-level: 6
+          retention-days: 7
+          path: |
+            runner/artifacts/manifest/*
+            runner/artifacts/qa/*
+            runner/source-counts.txt
+            runner/satori-wall-run.log
